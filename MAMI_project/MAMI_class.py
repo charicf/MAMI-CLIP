@@ -49,8 +49,6 @@ class CFG:
 
 
 	debug = False
-	#image_path = "C:/Moein/AI/Datasets/Flicker-8k/Images"
-	#image_path = "/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/TRAINING/"
 	home_path = os.path.dirname(os.path.realpath(__file__))
 	image_path = f"{home_path}/TRAINING"
 	#image_path = f"{home_path}/TEST"
@@ -343,7 +341,6 @@ def process_data(dir_path, clean_data_file=1):
 
 	df_clean.to_csv('processed_texts.csv', index=False, na_rep='')
 	#%cp -av processed_texts.csv $dir_path
-	#df_processed = pd.read_csv('/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/processed_texts.csv', header='infer', keep_default_na=False)
 
 	return df_clean
 
@@ -534,7 +531,6 @@ def get_image_embeddings(test, model_path):
 
 def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
-	#pdb.set_trace()
 	#qu = [tokenizer(c, padding=True) for c in query]
 	encoded_query = tokenizer(query, padding=True) # Padding true to pad to the longest sequence in the query so both tensors are same size
 
@@ -545,7 +541,6 @@ def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	with torch.no_grad():
 		text_features = model.text_encoder(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
 		text_embeddings = model.text_projection(text_features)
-	#pdb.set_trace()
 	image_embeddings_n = F.normalize(image_embeddings, p=2, dim=-1)
 	text_embeddings_n = F.normalize(text_embeddings, p=2, dim=-1)
 	dot_similarity = text_embeddings_n @ image_embeddings_n.T # Find similarity between the query text embedding and the images in the batch. Returns  vector of size 1 x #images in batch 
@@ -556,8 +551,6 @@ def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	logits = logit_scale * text_embeddings_n @ image_embeddings_n.T
 
 	probs = logits.T.softmax(dim=-1).cpu().numpy()
-
-	#pdb.set_trace()
 	
 	'''
 	values, indices = torch.topk(dot_similarity.squeeze(0), n * 1)
@@ -613,7 +606,6 @@ def main():
 	with open(os.path.join(home_dir, "google_profanity_words.txt")) as f:
 		for line in f:
 			swearWords.add(line.rstrip())
-	#print(swearWords)
 
 	#train_df, valid_df = make_train_valid_dfs()
 
@@ -652,19 +644,12 @@ def main():
 		train_CLIP(train, validation)
 		
 	test = pd.read_csv(os.path.join(home_dir,'test_small.csv'), header='infer', keep_default_na=False)
-	#append_label_as_text(test)
 
 	model, image_embeddings = get_image_embeddings(test, "best.pt")
 
 	probs = []
 	y_pred = []
-	#pdb.set_trace()
-	#test['transcripts1'] = test['transcripts']
-	#test['transcripts'] = test['transcripts'].apply(lambda x: x+' [SEP] a meme')
-	#test['transcripts1'] = test['transcripts1'].apply(lambda x: x+' [SEP] a misogynist meme')
-	#query = test[['transcripts', 'transcripts1']].values.tolist()
-	#query = np.array(query)
-	#pdb.set_trace()
+
 	for index, row in test.iterrows():
 		query = [row['transcripts']+" [SEP] a meme", row['transcripts']+" [SEP] a misogynist meme"]
 		prob = find_matches(model, image_embeddings[index].unsqueeze(0), query, image_filenames=test['file_name'].values, n=9)

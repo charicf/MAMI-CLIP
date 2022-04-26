@@ -1,0 +1,11 @@
+*.csv
+*.jpg
+*.png
+*.zip
+*.txt
+*.pt
+/MAMI_project/TESTING
+/MAMI_project/TRAINING
+/MAMI_project/Users
+/MAMI_project/versions
+/MAMI_project/files_nov

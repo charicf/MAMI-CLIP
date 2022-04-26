@@ -53,6 +53,7 @@ class CFG:
 	#image_path = "/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/TRAINING/"
 	home_path = os.path.dirname(os.path.realpath(__file__))
 	image_path = f"{home_path}/TRAINING"
+	#image_path = f"{home_path}/TEST"
 	batch_size = 1
 	num_workers = 0
 	head_lr = 1e-3
@@ -64,7 +65,7 @@ class CFG:
 	epochs = 4
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-	model_name = 'resnet50'
+	model_name = 'resnet50' #'vit_base_patch16_224'
 	image_embedding = 2048
 	text_encoder_model = "distilbert-base-uncased"
 	text_embedding = 768
@@ -76,7 +77,8 @@ class CFG:
 	temperature = 1.0
 
 	# image size
-	size = 224
+	size = 224 # for resnet50, 'vit_large_patch16_224', 'vit_base_patch16_224'
+	#size = 384 # for 'vit_large_patch16_384'
 
 	# for projection head; used for both image and text encoders
 	num_projection_layers = 1
@@ -111,8 +113,8 @@ class CLIPDataset(torch.utils.data.Dataset):
 
 		self.image_filenames = dataframe['file_name']
 		self.captions = list(dataframe['transcripts'])  
-		self.labels = dataframe['misogynous']
-		#pdb.set_trace()
+		self.labels = dataframe['misogynous']# Comment for testing
+        # encoded_captions returns a dictionary with keys input_ids and attention_mask
 		self.encoded_captions = tokenizer(list(dataframe['transcripts']), padding=True, truncation=True, max_length=CFG.max_length) # Dic with two keys: 'input_ids' and 'attention_mask'. Each key has len(examples) arrays
 		self.transforms = transforms
 
@@ -146,6 +148,9 @@ class ImageEncoder(nn.Module):
 		self.model = timm.create_model(
 			model_name, pretrained, num_classes=0, global_pool="avg"
 		)
+		# Print size of embedding agter image encoder
+		o = self.model(torch.randn(2, 3, CFG.size, CFG.size))
+		print(f'Image embeddings shape: {o.shape}')
 		for p in self.model.parameters():
 			p.requires_grad = trainable
 
@@ -210,6 +215,8 @@ class CLIPModel(nn.Module):
 		self.image_projection = ProjectionHead(embedding_dim=image_embedding)
 		self.text_projection = ProjectionHead(embedding_dim=text_embedding)
 		self.temperature = temperature
+		#self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)
+		self.logit_scale = nn.Parameter(torch.ones([]) * -0.2)
 
 	def forward(self, batch):
 		# Getting Image and Text Features
@@ -222,7 +229,11 @@ class CLIPModel(nn.Module):
 		text_embeddings = self.text_projection(text_features)
 
 		# Calculating the Loss
-		logits = (text_embeddings @ image_embeddings.T) / self.temperature # Logits is contains the similarity matrix between the text and image embeddings. Its size is batch_size x batch_size
+		#   Compute the similarity matrix
+		#logits = (text_embeddings @ image_embeddings.T) / self.temperature # Logits contains the similarity matrix between the text and image embeddings. Its size is batch_size x batch_size
+		logit_scale = self.logit_scale.exp()
+		logits = logit_scale * image_features @ text_features.t()
+		#   Compute the target
 		images_similarity = image_embeddings @ image_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
 		texts_similarity = text_embeddings @ text_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
 		targets = F.softmax(
@@ -264,7 +275,7 @@ nlp = spacy.load('en_core_web_sm')
 words = set(nltk.corpus.words.words())
 selected_words = {'fuckin', 'vs.', 'toes', 'fuck', 'rap', 'hoe', 'ear', 'females', 'twitter', 'fang', 'reddit', 'islam', 'tittys', 'fuck', 'photoshop', 'boobs+cleavage=', 'tattoos', 'jenner', 'wars', 'covid-19', 'coronavirus', 'democrats', 'india', 'mcdonalds', 'christmas', 'biden', 'schoolgirls', 'girlfriend', 'instagram', 'coworker', 'amazon', 'halloween', 'girls', 'bernie', 'milf', 'milfs', 'hinduism', 'jainism', 'buddhism', 'sikhism', 'christainnity', 'christian', 'jain', 'hindu', 'buddhist', 'sikh', 'muslim', 'scarlett', 'johansson', 'hormones', 'prostitutein', 'prostituã', 'prostituierte', 'prostituta', 'hillary', 'clinton', 'teresa', 'heinz', 'barbara', 'hellen', 'thomas', 'cindy', 'sheehan', 'monica', 'lewinsky', 'christiane', 'amanpour', 'michelle', 'obama', 'susan', 'estrich', 'pelosi', 'rosie', 'wouldonnell', 'barbara', 'streisand', 'madeleine', 'albright', 'janeane', 'garofalo', 'schoolgirls', 'cougar'}
 
-def pre_process_POS(text, nlp, words, selected_words):
+def pre_process_POS(text, nlp, words, namelist, profanity_words, spell):
 
 	#Creating doc object
 	doc = nlp(text)
@@ -276,15 +287,22 @@ def pre_process_POS(text, nlp, words, selected_words):
 			if token.lemma_ == '-PRON-':
 				lemma_tokens.append(token.text)
 			else:
-			  lemma_tokens.append(token.lemma_)
-		elif (token.text in words) or (token.text in selected_words):
+				lemma_tokens.append(token.lemma_)
+		elif (token.text in words) or (token.text in namelist) or (len(spell.unknown([token.text]))==0) or (token.text in profanity_words):
 			if token.lemma_ == '-PRON-':
 				lemma_tokens.append(token.text)
 			else:
 				lemma_tokens.append(token.lemma_)
 
+		#print(token.text)
+	#else:
+		# discarded.append([token.text, token.pos_])
+	#print('lemma: ', lemma_tokens)
+	#print(discarded)
+
 	# Take out the stopwords
 	text_tokens =[t for t in lemma_tokens if t not in stopwords.words('english')]
+	#print('stopwords: ',text_tokens)
 
 	# Extract only the alphabetic characters (deletes numbers too)
 	non_text_tokens = [t for t in text_tokens if t.isalpha() == False]
@@ -293,6 +311,96 @@ def pre_process_POS(text, nlp, words, selected_words):
 
 	return ' '.join(text_tokens) # Returns a tokens as string
 
+def process_data(dir_path, clean_data_file=1):
+	if clean_data_file==1:
+		df_clean = pd.read_csv(os.path.join(home_dir, 'cleaned_texts.csv'), header='infer')
+	else:
+		# Read data from original csv file and lower case the texts
+		data_info = pd.read_csv(os.path.join(home_dir, 'training.csv'), sep='\t', header='infer')
+		#data_info = pd.read_csv(os.path.join(home_dir, 'Test.csv'), sep='\t', header='infer')
+		data_info = data_info.rename({'Text Transcription': 'transcripts'}, axis=1)
+		data_info['transcripts'] = data_info['transcripts'].str.lower()
+
+		#Clean the texts bby applying the preprocess_regex. Save the dataframe into 'cleaned_texts.csv'
+		df_clean = data_info.copy()
+		df_clean['transcripts'] = df_clean.apply(lambda row : preprocess_regex(row[6]), axis = 1) #Apply preprocess_regex to row 6 ('transcripts')
+		df_clean.to_csv('cleaned_texts.csv', index=False)
+		#%cp -av cleaned_texts.csv $dir_path # Save data with cleaned texts from regex
+
+	##### Apply pre_process_POS to pre-process the texts (applying POS tagging). Save the new dataframe as 'processed_texts.csv' #####
+
+	# Construct a list of classified names, using the names corpus.
+	namelist = ([name.lower() for name in names.words('male.txt')] + [name.lower() for name in names.words('female.txt')])
+	#Swear words from google_profanity_words.txt
+	profanity_words = {'chink', 'b00bs', 'donkeyribber', 'kunilingus', 'mutherfucker', 'fudge packer', 'semen', 'motherfuckings', 'jiz', 'pussies', 'fux', 'cipa', 'boner', 'jerk-off', 'jackoff', 'nobjokey', 'beastiality', 'poop', '5hit', 'shited', 'fukkin', 'fistfuck', 'lusting', 's hit', 'jap', 'cumming', 'fingerfucking', 'pissing', 'gangbang', 'boooobs', 'whore', 'fukwhit', 'kum', 'masterb8', 'dick', 'muff', 'fagging', 'nigger', 'v1gra', 'twunter', 'pecker', 'l3i+ch', 'fuckings', 'duche', 'breasts', 'pimpis', 'kums', 'cuntlick', 'tittie5', 'fingerfucked', 'rimjaw', 'fuckwit', 'tittywank', 'fucked', 'beastial', 'ma5terbate', 'dogging', 'l3itch', 'mothafuck', 'feck', 'm0f0', 'cok', 'w00se', 'm0fo', 'shittings', 'horniest', 'phuked', 'penis', 'boobs', 'masterbation', 'cunnilingus', 'a_s_s', 'assfukka', 'cockmuncher', 'orgasm', 'muthafuckker', 'cuntlicking', 'knobead', 'mothafuckaz', 'pissin', 'clit', 'shemale', 'nazi', 'damn', 'goddamn', 'cunilingus', 'b!tch', 'mutha', 'fuks', 'ejaculation', 'bastard', 'gaylord', 'phuking', 'xxx', 'fags', 'faggot', 'nob', 'faggitt', 'god-dam', 'buttplug', 'mothafucka', 'muther', 'p0rn', 'cocksukka', 'cl1t', 'shitey', 'tw4t', 'ejaculate', 'teets', 'tittyfuck', 'f u c k e r', 'pussy', 'dirsa', 'ejakulate', 'shitted', 'willies', 'fellate', 'cums', 'fuckwhit', 'ma5terb8', 'mof0', 'bloody', 'asswhole', 't1tt1e5', 'masochist', 'motherfuckin', 'hardcoresex', 'heshe', 'mothafucks', 'asses', 'goddamned', 'phuks', 'homo', 'horny', 'balls', 'hotsex', 'kumming', 'mothafuckin', 'bi+ch', 'ass-fucker', 'fooker', 'numbnuts', 'cyberfuckers', 'fuckme', 'fannyflaps', 'coon', 'jizz', 'booooooobs', 'pissoff', 'wang', 'prick', 'fingerfuckers', 'f u c k', 'bitcher', 'smegma', 'testical', 'skank', 'twat', 'nobhead', 'fistfuckers', 'boiolas', 'pusse', 'fellatio', 'cumshot', 'fcuk', 'anal', 'motherfuckers', 'knobhead', 'porn', 'tits', 'motherfucks', 'knobjokey', 'kock', 'ejaculating', 'kummer', 'anus', 'labia', 'fudgepacker', 'flange', 'hore', 'assfucker', 'kondum', 'clitoris', 'fistfuckings', 'titwank', 'nigga', 'fuk', 'fuckers', 'mothafuckas', 'tittiefucker', 'pisses', 'shitting', 'fistfucking', 'n1gger', 'motherfuckka', 'God', 'ass', 'cokmuncher', 'cunillingus', 'shag', 'a55', 'bitchin', 'schlong', 'wanky', 'cockhead', 'dildos', 'felching', 'f4nny', 'biatch', 'sluts', 'cum', 'mo-fo', 'orgasms', 'cyberfucking', 'fuck', 'testicle', 'vagina', 'cyalis', 'kawk', 'bitches', 'scrotum', 'fukwit', 'cunts', 'pisser', 'willy', 'bugger', 'v14gra', 'shitings', 'fucking', 'booooobs', 'nigg4h', 'titfuck', 'rectum', 'ar5e', 'fux0r', 'masturbate', 'fucks', '5h1t', 'masterbat3', 'pawn', 'c0cksucker', 'viagra', 'gangbanged', 'ejaculated', 'motherfucker', 'muthafecker', 'hoer', 'fcuker', 'motherfuck', 'clits', 'snatch', 'motherfucking', 'fucka', 'mofo', 'penisfucker', 'turd', 'smut', 'cockmunch', 'b1tch', 'pornos', 'shagging', 'fingerfucks', 'god-damned', 'mothafucking', 'shitfull', 'dickhead', 'pissed', 'pussys', 'shi+', 'phonesex', 'niggaz', 'cocksuka', 'blow job', 'piss', 'arse', 'scrote', 'mother fucker', 'fanyy', 'fatass', 'niggers', 'porno', 'm45terbate', 'shit', 'nutsack', 'knobend', 'dlck', 'shitfuck', 'cock-sucker', 'knobjocky', 'shithead', 'mothafucked', 'cocksucking', 'fcuking', 'mothafucker', 'faggs', 'screwing', 'fuker', 'cockface', 'bum', 'master-bate', 'masterbations', 'blowjobs', 'ballbag', 'tosser', 'cyberfuck', 'cyberfucked', 'vulva', 'nobjocky', 'scroat', 'bestiality', 'ejaculatings', 'phukked', 'cocks', 'fingerfucker', 'hoar', 'fistfucker', 'gaysex', 'd1ck', 'cnut', 'pron', 'shite', 'titties', 'xrated', 'cuntlicker', 'butt', 'orgasims', 'fecker', 'b17ch', 'cyberfucker', 'niggas', 'cocksucks', 'fag', 'phukking', 'pube', 'pussi', 'fuckingshitmotherfucker', 'sh!+', 'rimming', 'shiting', 'jizm', 'coksucka', 'sex', 'motherfucked', 's_h_i_t', 'goatse', 'sh!t', 's.o.b.', 'c0ck', 'butthole', 't1tties', 'lust', 'fanny', 'fucker', 'pigfucker', 'dink', 'twunt', 'mothafuckings', 'shits', 'slut', 'dyke', 'spac', 'fook', 'cock', 'bunny fucker', 'sh1t', 'dildo', 'fukker', 'jack-off', '4r5e', 'dinks', 'wanker', 'son-of-a-bitch', 'pissers', 'fistfucked', 'bellend', 'booobs', 'fuckin', 'wank', 'asshole', 'buttmunch', 'cyberfuc', 'teez', 'bollock', 'n1gga', 'dog-fucker', 'nob jokey', 'cocksucked', 'bitching', 'nigg3r', 'hell', 'sadist', 'shitdick', 'shaggin', 'masterbat*', 'bitch', 'doggin', 'fannyfucker', 'boob', 'masterbate', 'shagger', 'knobed', 'shitters', 'crap', 'fagots', 'blowjob', 'arrse', 'spunk', 'lmfao', 'pissflaps', 'niggah', 'whoar', 'f_u_c_k', 'mothafuckers', 'buceta', 'phuck', 'fuckheads', 'pornography', 'fistfucks', 'carpet muncher', 'bestial', 'shitty', 'kondums', 'jism', 'shitter', 'titt', 'cawk', 'phuq', 'tit', 'bitchers', 'ballsack', 'phuk', 'cox', 'twathead', 'twatty', 'assholes', 'doosh', 'cocksucker', 'bollok', 'fingerfuck', 'knob', 'cocksuck', 'orgasim', 'hoare', 'fagot', 'ejaculates', 'cummer', 'gangbangs', 'pricks', 'fuckhead', 'cunt', 'retard'}
+	nlp = spacy.load('en_core_web_sm')
+	english_words = set(nltk.corpus.words.words())
+	spell = SpellChecker() # It does not discard Twitter, Verizon, iphone...
+
+	df_clean['transcripts'] = df_clean.apply(lambda row : pre_process_POS(row[6], nlp, english_words, namelist, profanity_words, spell), axis = 1)
+	df_clean.transcripts = df_clean.transcripts.fillna('') # replace na's with empty strings
+	print(len(df_clean[df_clean['transcripts'] == '']), 'rows have empty srtings')
+
+	df_clean.to_csv('processed_texts.csv', index=False, na_rep='')
+	#%cp -av processed_texts.csv $dir_path
+	#df_processed = pd.read_csv('/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/processed_texts.csv', header='infer', keep_default_na=False)
+
+	return df_clean
+
+def split_sets(data, dir_path, train_perc=0.9, vali_perc=0.2):
+
+	#msk = np.random.rand(len(no_miso)) < 0.8
+	#train = no_miso[msk]
+	#test = no_miso[~msk]
+
+	# Vali_perc != 0 means that there is a validation set
+	if vali_perc!=0:
+		# Split data into train (0.9) and test(0.1)
+		train_val = data.groupby('misogynous').sample(frac=train_perc)
+		test = data.loc[data.index.difference(train_val.index)]
+		# Split train into training (0.8) and validating(0.2)
+		train = train_val.groupby('misogynous').sample(frac=1-vali_perc)
+		validation = train_val.loc[train_val.index.difference(train.index)]
+
+		# Save set: Validation
+		validation.to_csv('validation.csv', index=False)
+		#%cp -av validation.csv $dir_path
+
+	else:
+		train = data.groupby('misogynous').sample(frac=train_perc)
+		test = data.loc[data.index.difference(train.index)]
+
+	# Save sets: Training, validating, and testing
+	train.to_csv('train.csv', index=False)
+	#%cp -av train.csv $dir_path
+
+	test.to_csv('test.csv', index=False)
+	#%cp -av test.csv $dir_path
+
+def make_small_train_set(df, dir_path, num_elems_class):
+	# Get num_elems_class rows with label misogynous and num_elems_class rows with label non misogynous
+	data = pd.concat([df.loc[df['misogynous'] == 0][:num_elems_class], df.loc[df['misogynous'] == 1][:num_elems_class]], ignore_index=True)
+	train_val = data.groupby('misogynous').sample(frac=.9)
+	test_small = data.loc[data.index.difference(train_val.index)]
+
+	train_small = train_val.groupby('misogynous').sample(frac=.8)
+	validation_small = train_val.loc[train_val.index.difference(train_small.index)]
+
+	train_small.to_csv('train_small.csv', index=False)
+	#%cp -av train_small.csv $dir_path
+
+	test_small.to_csv('test_small.csv', index=False)
+	#%cp -av test_small.csv $dir_path
+
+	validation_small.to_csv('validation_small.csv', index=False)
+	#%cp -av validation_small.csv $dir_path
+
+def append_label_as_text(dataframe):
+
+	dataframe.loc[dataframe['misogynous'] == 1, 'transcripts'] = dataframe.loc[dataframe['misogynous'] == 1].apply(lambda row : row[6]+' [SEP] a misogynist meme' , axis = 1)
+	dataframe.loc[dataframe['misogynous'] == 0, 'transcripts'] = dataframe.loc[dataframe['misogynous'] == 0].apply(lambda row : row[6]+' [SEP] a meme' , axis = 1)
+
+	return dataframe
 
 def get_transforms(mode="train"):
 	if mode == "train":
@@ -369,6 +477,45 @@ def valid_epoch(model, valid_loader):
 		tqdm_object.set_postfix(valid_loss=loss_meter.avg)
 	return loss_meter
 
+def train_CLIP(train, validation):
+	tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
+	train_loader = build_loaders(train, tokenizer, mode="train")
+	valid_loader = build_loaders(validation, tokenizer, mode="valid")
+
+
+	model = CLIPModel().to(CFG.device)
+	params = [
+		{"params": model.image_encoder.parameters(), "lr": CFG.image_encoder_lr},
+		{"params": model.text_encoder.parameters(), "lr": CFG.text_encoder_lr},
+		{"params": itertools.chain(
+			model.image_projection.parameters(), model.text_projection.parameters()
+		), "lr": CFG.head_lr, "weight_decay": CFG.weight_decay}
+	]
+	optimizer = torch.optim.AdamW(params, weight_decay=0.)
+	lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+		optimizer, mode="min", patience=CFG.patience, factor=CFG.factor
+	)
+	step = "epoch"
+
+	best_loss = float('inf')
+	for epoch in range(CFG.epochs):
+		print(f"Epoch: {epoch + 1}")
+		model.train()
+		train_loss = train_epoch(model, train_loader, optimizer, lr_scheduler, step)
+		model.eval()
+
+		torch.save(model.state_dict(), f"{CFG.home_path}/best.pt")
+		
+		with torch.no_grad():
+			valid_loss = valid_epoch(model, valid_loader)
+		
+		if valid_loss.avg < best_loss:
+			best_loss = valid_loss.avg
+			torch.save(model.state_dict(), "best.pt")
+			print("Saved Best Model!")
+		
+		lr_scheduler.step(valid_loss.avg)
+
 def get_image_embeddings(test, model_path):
 	tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
 	test_loader = build_loaders(test, tokenizer, mode="valid")
@@ -387,44 +534,28 @@ def get_image_embeddings(test, model_path):
 
 def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
-	#encoded_query = tokenizer(query)
-	
-	'''
-	batch1 = {'input_ids': [], 'attention_mask': []}
-	for i in range(len(query)):
-		for key, values in encoded_query.items():
-			batch1[key].append(torch.tensor(values[i]).to(CFG.device))
-	batch1["input_ids"] = torch.stack((batch1["input_ids"])).to(CFG.device)
-	batch1["attention_mask"] = torch.stack((batch1["attention_mask"])).to(CFG.device)
-	pdb.set_trace()
-	'''
-	similarities = []
-	simil = []
-	for q1 in query:
-		#pdb.set_trace()
-		encoded_query = tokenizer([q1])
-		batch = {
+	#pdb.set_trace()
+	#qu = [tokenizer(c, padding=True) for c in query]
+	encoded_query = tokenizer(query, padding=True) # Padding true to pad to the longest sequence in the query so both tensors are same size
+
+	batch = {
 			key: torch.tensor(values).to(CFG.device)
 			for key, values in encoded_query.items()
 		}
-		with torch.no_grad():
-			text_features = model.text_encoder(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-			text_embeddings = model.text_projection(text_features)
-		
-		image_embeddings_n = F.normalize(image_embeddings, p=2, dim=-1)
-		text_embeddings_n = F.normalize(text_embeddings, p=2, dim=-1)
-		dot_similarity = text_embeddings_n @ image_embeddings_n.T # Find similarity between the query text embedding and the images in the batch. Returns  vector of size 1 x #images in batch 
+	with torch.no_grad():
+		text_features = model.text_encoder(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+		text_embeddings = model.text_projection(text_features)
+	#pdb.set_trace()
+	image_embeddings_n = F.normalize(image_embeddings, p=2, dim=-1)
+	text_embeddings_n = F.normalize(text_embeddings, p=2, dim=-1)
+	dot_similarity = text_embeddings_n @ image_embeddings_n.T # Find similarity between the query text embedding and the images in the batch. Returns  vector of size 1 x #images in batch 
 
-		# cosine similarity as logits
-		logit_scale = (torch.ones([]) * np.log(1 / 0.07)).exp()
-		logits_per_image = logit_scale * text_embeddings_n @ image_embeddings_n.T
-		logits_per_text = logits_per_image.t()
+	
+	# cosine similarity as logits
+	logit_scale = (torch.ones([]) * np.log(1 / 0.05)).exp()
+	logits = logit_scale * text_embeddings_n @ image_embeddings_n.T
 
-		similarities.append(dot_similarity)
-		simil.append(logits_per_image)
-	dot_similarity = torch.stack((similarities)).squeeze(1)
-	dot_simil = torch.stack((simil)).squeeze(1)
-	probs = dot_simil.T.softmax(dim=-1).cpu().numpy()
+	probs = logits.T.softmax(dim=-1).cpu().numpy()
 
 	#pdb.set_trace()
 	
@@ -448,11 +579,14 @@ def main():
 	# You can add any args you want here
 	parser = argparse.ArgumentParser(description='Hyperparams')
 	parser.add_argument('-p',  nargs='?', type=str, default='dataset', help='Path to dataset')
-	parser.add_argument('-mode',  nargs='?', type=int, default=0, help='0: to validate, 1: to train')
+	parser.add_argument('-mode',  nargs='?', type=int, default=0, help='0: to test, 1: to train')
+	parser.add_argument('-cleaned',  nargs='?', type=int, default=1, help='0: otw, 1: if cleaned_texts.csv exists')
+	parser.add_argument('-processed',  nargs='?', type=int, default=1, help='0: otw, 1: if processed_texts.csv exists')
+	parser.add_argument('-split', nargs='?', type=int, default=0, help='1: Perform the split of dataset, otw: Do not perform split')
+	parser.add_argument('-stat', nargs='?', type=int, default=0, help='1: Show statistics, otw: Do not show stats')
 	parser.add_argument('-train',  nargs='?', type=str, default="train.csv", help='name of csv file')
 	parser.add_argument('-test',  nargs='?', type=str, default="test.csv", help='name of csv file')
 	parser.add_argument('-valid',  nargs='?', type=str, default="validation.csv", help='name of csv file')
-	parser.add_argument('-s',  nargs='?', type=int, default=0, help='1: Perform the split of dataset, otw: Do not perform split')
 	parser.add_argument('-si',  nargs='?', type=int, default=8000, help='Index to split training from testing')
 	parser.add_argument('-seed', type=int, default=1, help='random seed (default: 1)')
 
@@ -469,85 +603,81 @@ def main():
 	train_csv_path = os.path.join(home_dir, args.train)
 	valid_csv_path = os.path.join(home_dir, args.valid)
 	test_csv_path = os.path.join(home_dir, args.test)
+	train_model = args.mode
+	clean_data_file = args.cleaned # 1 if the file with cleaned data already exists (after regex)
+	processed_data = args.processed # 1 if the file with pre-processed data already exists (after POS)
+	split_set = args.split # 1 to split data into training, validation and testing sets
+	show_statistics = args.stat # 1 to show statistics, including plots
 
 	swearWords= set()
 	with open(os.path.join(home_dir, "google_profanity_words.txt")) as f:
 		for line in f:
 			swearWords.add(line.rstrip())
-	profanity_words = {'chink', 'b00bs', 'donkeyribber', 'kunilingus', 'mutherfucker', 'fudge packer', 'semen', 'motherfuckings', 'jiz', 'pussies', 'fux', 'cipa', 'boner', 'jerk-off', 'jackoff', 'nobjokey', 'beastiality', 'poop', '5hit', 'shited', 'fukkin', 'fistfuck', 'lusting', 's hit', 'jap', 'cumming', 'fingerfucking', 'pissing', 'gangbang', 'boooobs', 'whore', 'fukwhit', 'kum', 'masterb8', 'dick', 'muff', 'fagging', 'nigger', 'v1gra', 'twunter', 'pecker', 'l3i+ch', 'fuckings', 'duche', 'breasts', 'pimpis', 'kums', 'cuntlick', 'tittie5', 'fingerfucked', 'rimjaw', 'fuckwit', 'tittywank', 'fucked', 'beastial', 'ma5terbate', 'dogging', 'l3itch', 'mothafuck', 'feck', 'm0f0', 'cok', 'w00se', 'm0fo', 'shittings', 'horniest', 'phuked', 'penis', 'boobs', 'masterbation', 'cunnilingus', 'a_s_s', 'assfukka', 'cockmuncher', 'orgasm', 'muthafuckker', 'cuntlicking', 'knobead', 'mothafuckaz', 'pissin', 'clit', 'shemale', 'nazi', 'damn', 'goddamn', 'cunilingus', 'b!tch', 'mutha', 'fuks', 'ejaculation', 'bastard', 'gaylord', 'phuking', 'xxx', 'fags', 'faggot', 'nob', 'faggitt', 'god-dam', 'buttplug', 'mothafucka', 'muther', 'p0rn', 'cocksukka', 'cl1t', 'shitey', 'tw4t', 'ejaculate', 'teets', 'tittyfuck', 'f u c k e r', 'pussy', 'dirsa', 'ejakulate', 'shitted', 'willies', 'fellate', 'cums', 'fuckwhit', 'ma5terb8', 'mof0', 'bloody', 'asswhole', 't1tt1e5', 'masochist', 'motherfuckin', 'hardcoresex', 'heshe', 'mothafucks', 'asses', 'goddamned', 'phuks', 'homo', 'horny', 'balls', 'hotsex', 'kumming', 'mothafuckin', 'bi+ch', 'ass-fucker', 'fooker', 'numbnuts', 'cyberfuckers', 'fuckme', 'fannyflaps', 'coon', 'jizz', 'booooooobs', 'pissoff', 'wang', 'prick', 'fingerfuckers', 'f u c k', 'bitcher', 'smegma', 'testical', 'skank', 'twat', 'nobhead', 'fistfuckers', 'boiolas', 'pusse', 'fellatio', 'cumshot', 'fcuk', 'anal', 'motherfuckers', 'knobhead', 'porn', 'tits', 'motherfucks', 'knobjokey', 'kock', 'ejaculating', 'kummer', 'anus', 'labia', 'fudgepacker', 'flange', 'hore', 'assfucker', 'kondum', 'clitoris', 'fistfuckings', 'titwank', 'nigga', 'fuk', 'fuckers', 'mothafuckas', 'tittiefucker', 'pisses', 'shitting', 'fistfucking', 'n1gger', 'motherfuckka', 'God', 'ass', 'cokmuncher', 'cunillingus', 'shag', 'a55', 'bitchin', 'schlong', 'wanky', 'cockhead', 'dildos', 'felching', 'f4nny', 'biatch', 'sluts', 'cum', 'mo-fo', 'orgasms', 'cyberfucking', 'fuck', 'testicle', 'vagina', 'cyalis', 'kawk', 'bitches', 'scrotum', 'fukwit', 'cunts', 'pisser', 'willy', 'bugger', 'v14gra', 'shitings', 'fucking', 'booooobs', 'nigg4h', 'titfuck', 'rectum', 'ar5e', 'fux0r', 'masturbate', 'fucks', '5h1t', 'masterbat3', 'pawn', 'c0cksucker', 'viagra', 'gangbanged', 'ejaculated', 'motherfucker', 'muthafecker', 'hoer', 'fcuker', 'motherfuck', 'clits', 'snatch', 'motherfucking', 'fucka', 'mofo', 'penisfucker', 'turd', 'smut', 'cockmunch', 'b1tch', 'pornos', 'shagging', 'fingerfucks', 'god-damned', 'mothafucking', 'shitfull', 'dickhead', 'pissed', 'pussys', 'shi+', 'phonesex', 'niggaz', 'cocksuka', 'blow job', 'piss', 'arse', 'scrote', 'mother fucker', 'fanyy', 'fatass', 'niggers', 'porno', 'm45terbate', 'shit', 'nutsack', 'knobend', 'dlck', 'shitfuck', 'cock-sucker', 'knobjocky', 'shithead', 'mothafucked', 'cocksucking', 'fcuking', 'mothafucker', 'faggs', 'screwing', 'fuker', 'cockface', 'bum', 'master-bate', 'masterbations', 'blowjobs', 'ballbag', 'tosser', 'cyberfuck', 'cyberfucked', 'vulva', 'nobjocky', 'scroat', 'bestiality', 'ejaculatings', 'phukked', 'cocks', 'fingerfucker', 'hoar', 'fistfucker', 'gaysex', 'd1ck', 'cnut', 'pron', 'shite', 'titties', 'xrated', 'cuntlicker', 'butt', 'orgasims', 'fecker', 'b17ch', 'cyberfucker', 'niggas', 'cocksucks', 'fag', 'phukking', 'pube', 'pussi', 'fuckingshitmotherfucker', 'sh!+', 'rimming', 'shiting', 'jizm', 'coksucka', 'sex', 'motherfucked', 's_h_i_t', 'goatse', 'sh!t', 's.o.b.', 'c0ck', 'butthole', 't1tties', 'lust', 'fanny', 'fucker', 'pigfucker', 'dink', 'twunt', 'mothafuckings', 'shits', 'slut', 'dyke', 'spac', 'fook', 'cock', 'bunny fucker', 'sh1t', 'dildo', 'fukker', 'jack-off', '4r5e', 'dinks', 'wanker', 'son-of-a-bitch', 'pissers', 'fistfucked', 'bellend', 'booobs', 'fuckin', 'wank', 'asshole', 'buttmunch', 'cyberfuc', 'teez', 'bollock', 'n1gga', 'dog-fucker', 'nob jokey', 'cocksucked', 'bitching', 'nigg3r', 'hell', 'sadist', 'shitdick', 'shaggin', 'masterbat*', 'bitch', 'doggin', 'fannyfucker', 'boob', 'masterbate', 'shagger', 'knobed', 'shitters', 'crap', 'fagots', 'blowjob', 'arrse', 'spunk', 'lmfao', 'pissflaps', 'niggah', 'whoar', 'f_u_c_k', 'mothafuckers', 'buceta', 'phuck', 'fuckheads', 'pornography', 'fistfucks', 'carpet muncher', 'bestial', 'shitty', 'kondums', 'jism', 'shitter', 'titt', 'cawk', 'phuq', 'tit', 'bitchers', 'ballsack', 'phuk', 'cox', 'twathead', 'twatty', 'assholes', 'doosh', 'cocksucker', 'bollok', 'fingerfuck', 'knob', 'cocksuck', 'orgasim', 'hoare', 'fagot', 'ejaculates', 'cummer', 'gangbangs', 'pricks', 'fuckhead', 'cunt', 'retard'}
+	#print(swearWords)
 
-	train = pd.read_csv(train_csv_path, header='infer', keep_default_na=False)
-	train.loc[train['misogynous'] == 1, 'transcripts'] = train.loc[train['misogynous'] == 1].apply(lambda row : row[6]+' [SEP] image depicting a misogynist' , axis = 1)
-	train.loc[train['misogynous'] == 0, 'transcripts'] = train.loc[train['misogynous'] == 0].apply(lambda row : row[6]+' [SEP] image depicting a not misogynist' , axis = 1)
-
-	valid = pd.read_csv(valid_csv_path, header='infer', keep_default_na=False)
-	valid.loc[valid['misogynous'] == 1, 'transcripts'] = valid.loc[valid['misogynous'] == 1].apply(lambda row : row[6]+' [SEP] image depicting a misogynist' , axis = 1)
-	valid.loc[valid['misogynous'] == 0, 'transcripts'] = valid.loc[valid['misogynous'] == 0].apply(lambda row : row[6]+' [SEP] image depicting a not misogynist' , axis = 1)
 	#train_df, valid_df = make_train_valid_dfs()
 
-	test = pd.read_csv(test_csv_path, header='infer', keep_default_na=False)
-	#test.loc[test['misogynous'] == 1, 'transcripts'] = test.loc[test['misogynous'] == 1].apply(lambda row : row[6]+' [SEP] image depicting a misogynist' , axis = 1)
-	#test.loc[test['misogynous'] == 0, 'transcripts'] = test.loc[test['misogynous'] == 0].apply(lambda row : row[6]+' [SEP] image depicting a not misogynist' , axis = 1)
+	#clean_data_file = 1 # 1 if the file with cleaned data already exists (after regex)
+	#processed_data = 1 # 1 if the file with pre-processed data already exists (after POS)
+	#split_set = 1 # 1 to split data into training, validation and testing sets
+	#show_statistics = 1 # 1 to show statistics, including plots
+
+	#----------- Pre-process the data -----------
+	if processed_data == 1:
+		# If csv file processed_data exits, load the data
+		df_processed = pd.read_csv(os.path.join(home_dir, 'processed_texts.csv'), header='infer', keep_default_na=False)
+	else:
+		# pre-process the transcripts and return the processed dataframe
+		df_processed = process_data(home_dir, clean_data_file)
 	
-	# If tain mode, it will enter to train the model
-	if args.mode == 1:
+	#--------- Show statistics --------------------
+	if show_statistics == 1:
+		show_corpus_statistics(df_processed)
 
-		tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
-		train_loader = build_loaders(train, tokenizer, mode="train")
-		valid_loader = build_loaders(valid, tokenizer, mode="valid")
+	# -------- split the data into three sets ------
+	if split_set == 1:
+		# If data has not been split, split it into training, validating, testing
+		#split_sets(df_processed, dir_path)
+		make_small_train_set(df_processed, dir_path, 500)
+	
+	# ---------- Load the data -----------------
+	train = pd.read_csv(os.path.join(home_dir, 'train_small.csv'), header='infer', keep_default_na=False)
+	append_label_as_text(train)
+	validation = pd.read_csv(os.path.join(home_dir, 'validation_small.csv'), header='infer', keep_default_na=False)
+	append_label_as_text(validation)
 
-
-		model = CLIPModel().to(CFG.device)
-		params = [
-			{"params": model.image_encoder.parameters(), "lr": CFG.image_encoder_lr},
-			{"params": model.text_encoder.parameters(), "lr": CFG.text_encoder_lr},
-			{"params": itertools.chain(
-				model.image_projection.parameters(), model.text_projection.parameters()
-			), "lr": CFG.head_lr, "weight_decay": CFG.weight_decay}
-		]
-		optimizer = torch.optim.AdamW(params, weight_decay=0.)
-		lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-			optimizer, mode="min", patience=CFG.patience, factor=CFG.factor
-		)
-		step = "epoch"
-
-		best_loss = float('inf') # Acts as an unbounded upper value for comparisonto find lowest values
-		for epoch in range(CFG.epochs):
-			print(f"Epoch: {epoch + 1}")
-			model.train()
-			train_loss = train_epoch(model, train_loader, optimizer, lr_scheduler, step)
-			model.eval()
-
-			torch.save(model.state_dict(), f"{CFG.home_path}/best.pt")
-			
-			with torch.no_grad():
-				valid_loss = valid_epoch(model, valid_loader)
-			
-			if valid_loss.avg < best_loss:
-				best_loss = valid_loss.avg
-				torch.save(model.state_dict(), "best.pt")
-				print("Saved Best Model!")
-			
-			lr_scheduler.step(valid_loss.avg)
+	#----------- Train model -----------------
+	if train_model == 1:
+		print('Training the model...')
+		train_CLIP(train, validation)
+		
+	test = pd.read_csv(os.path.join(home_dir,'test_small.csv'), header='infer', keep_default_na=False)
+	#append_label_as_text(test)
 
 	model, image_embeddings = get_image_embeddings(test, "best.pt")
 
 	probs = []
 	y_pred = []
 	#pdb.set_trace()
-	test['transcripts1'] = test['transcripts']
-	test['transcripts'] = test['transcripts'].apply(lambda x: x+' [SEP] image depicting a not misogynist')
-	test['transcripts1'] = test['transcripts1'].apply(lambda x: x+' [SEP] image depicting a misogynist')
-	query = test[['transcripts', 'transcripts1']].values.tolist()
+	#test['transcripts1'] = test['transcripts']
+	#test['transcripts'] = test['transcripts'].apply(lambda x: x+' [SEP] a meme')
+	#test['transcripts1'] = test['transcripts1'].apply(lambda x: x+' [SEP] a misogynist meme')
+	#query = test[['transcripts', 'transcripts1']].values.tolist()
+	#query = np.array(query)
+	#pdb.set_trace()
 	for index, row in test.iterrows():
-		#prob = find_matches(model, image_embeddings[index].unsqueeze(0), query=[row['transcripts']+" [SEP] image depicting a not misogynist", row['transcripts']+" [SEP] image depicting a misogynist"], image_filenames=test['file_name'].values, n=9)
-		prob = find_matches(model, image_embeddings[index].unsqueeze(0), query=query[index], image_filenames=test['file_name'].values, n=9)
+		query = [row['transcripts']+" [SEP] a meme", row['transcripts']+" [SEP] a misogynist meme"]
+		prob = find_matches(model, image_embeddings[index].unsqueeze(0), query, image_filenames=test['file_name'].values, n=9)
+		#prob = find_matches(model, image_embeddings[index].unsqueeze(0), query=query[index], image_filenames=test['file_name'].values, n=9)
+		#prob = find_matches(model, image_embeddings, query=query, image_filenames=test['file_name'].values, n=9)
 		probs.append(prob)
-		y_pred.append(np.argmax(prob))
+		y_pred.append(np.argmax(prob)) # The largest prob between both labels is taken as the prediction
+
+	print('y_pred: ', y_pred)
 
 	y_true = test['misogynous'].values.tolist()
 	target_names = ['not misogynous', 'misogynous']
-	print(classification_report(y_true, y_pred, target_names=target_names))
+	print(classification_report(y_true, y_pred, target_names=target_names), '\n')
 
 
 if __name__ == '__main__':

@@ -49,6 +49,8 @@ class CFG:
 
 
 	debug = False
+	#image_path = "C:/Moein/AI/Datasets/Flicker-8k/Images"
+	#image_path = "/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/TRAINING/"
 	home_path = os.path.dirname(os.path.realpath(__file__))
 	image_path = f"{home_path}/TRAINING"
 	#image_path = f"{home_path}/TEST"
@@ -69,6 +71,7 @@ class CFG:
 	text_embedding = 768
 	text_tokenizer = "distilbert-base-uncased"
 	max_length = 200
+	labels_max_length = 50
 
 	pretrained = True # for both image encoder and text encoder
 	trainable = True # for both image encoder and text encoder
@@ -111,9 +114,12 @@ class CLIPDataset(torch.utils.data.Dataset):
 
 		self.image_filenames = dataframe['file_name']
 		self.captions = list(dataframe['transcripts'])  
-		self.labels = dataframe['misogynous']# Comment for testing
-        # encoded_captions returns a dictionary with keys input_ids and attention_mask
-		self.encoded_captions = tokenizer(list(dataframe['transcripts']), padding=True, truncation=True, max_length=CFG.max_length) # Dic with two keys: 'input_ids' and 'attention_mask'. Each key has len(examples) arrays
+		self.labels = list(dataframe['misogynous'])# Comment for testing
+		# encoded_captions returns a dictionary with keys input_ids and attention_mask
+		self.encoded_captions = tokenizer(
+			list(dataframe['transcripts']), padding=True, truncation=True, max_length=CFG.max_length
+		) # Dic with two keys: 'input_ids' and 'attention_mask'. Each key has len(examples) arrays
+		self.encoded_labels_text = tokenizer(list(dataframe['misogynous']), padding=True, truncation=True, max_length=CFG.labels_max_length) # Dic with two keys: 'input_ids' and 'attention_mask'. Each key has len(examples) arrays
 		self.transforms = transforms
 
 	def __getitem__(self, idx):
@@ -122,11 +128,16 @@ class CLIPDataset(torch.utils.data.Dataset):
 			for key, values in self.encoded_captions.items()
 		} # Item contains the values for the 'input_ids' and 'attention_mask' for the caption idx
 
+		
+		for key, values in self.encoded_labels_text.items():
+			item[key+"_labels"] = torch.tensor(values[idx])
+
 		image = cv2.imread(f"{CFG.image_path}/{self.image_filenames[idx]}")
 		image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 		image = self.transforms(image=image)['image']
 		item['image'] = torch.tensor(image).permute(2, 0, 1).float()
 		item['caption'] = self.captions[idx]
+		item['label'] = self.labels[idx]
 
 		return item
 
@@ -212,6 +223,8 @@ class CLIPModel(nn.Module):
 		self.text_encoder = TextEncoder()
 		self.image_projection = ProjectionHead(embedding_dim=image_embedding)
 		self.text_projection = ProjectionHead(embedding_dim=text_embedding)
+		self.img_text_projection1 = ProjectionHead(embedding_dim=image_embedding + text_embedding)
+		self.img_text_projection = ProjectionHead(embedding_dim=2*CFG.projection_dim)
 		self.temperature = temperature
 		#self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)
 		self.logit_scale = nn.Parameter(torch.ones([]) * -0.2)
@@ -222,15 +235,20 @@ class CLIPModel(nn.Module):
 		text_features = self.text_encoder(
 			input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
 		)
+		labels_features = self.text_encoder(input_ids=batch["input_ids_labels"], attention_mask=batch["attention_mask_labels"])
+
+		img_text_features = torch.cat((image_features, text_features),1)
+		
+		'''
 		# Getting Image and Text Embeddings (with same dimension)
 		image_embeddings = self.image_projection(image_features)
 		text_embeddings = self.text_projection(text_features)
-
+		
 		# Calculating the Loss
 		#   Compute the similarity matrix
 		#logits = (text_embeddings @ image_embeddings.T) / self.temperature # Logits contains the similarity matrix between the text and image embeddings. Its size is batch_size x batch_size
 		logit_scale = self.logit_scale.exp()
-		logits = logit_scale * image_features @ text_features.t()
+		logits = logit_scale *  image_embeddings @ text_embeddings.t()
 		#   Compute the target
 		images_similarity = image_embeddings @ image_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
 		texts_similarity = text_embeddings @ text_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
@@ -240,6 +258,33 @@ class CLIPModel(nn.Module):
 		texts_loss = cross_entropy(logits, targets, reduction='none') #With the targets matrix, we will use simple cross entropy to calculate the actual loss.
 		images_loss = cross_entropy(logits.T, targets.T, reduction='none')
 		loss =  (images_loss + texts_loss) / 2.0 # shape: (batch_size)
+		'''
+
+		# Getting Image and Text Embeddings (with same dimension)
+		image_embeddings = self.image_projection(image_features)
+		img_txt_embeddings1 = self.img_text_projection1(img_text_features)
+		texts_embeddings = self.text_projection(text_features)
+		img_txt_embeddings = torch.cat((image_embeddings, texts_embeddings),1)
+		img_txt_embeddings = self.img_text_projection(img_txt_embeddings)
+		pdb.set_trace()
+		texts_embeddings = self.text_projection(labels_features)
+
+		# Calculating the Loss
+		#   Compute the similarity matrix
+		#logits = (text_embeddings @ image_embeddings.T) / self.temperature # Logits contains the similarity matrix between the text and image embeddings. Its size is batch_size x batch_size
+		logit_scale = self.logit_scale.exp()
+		logits = logit_scale *  img_txt_embeddings @ texts_embeddings.t() # Shape is batch_size by batch_size
+		#   Compute the target
+		img_text_similarity = img_txt_embeddings @ img_txt_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
+		texts_similarity = texts_embeddings @ texts_embeddings.T # Similarity between same images should output higher values in the diagonal. This means they are similar (both are same matrix)
+		targets = F.softmax(
+			(img_text_similarity + texts_similarity) / 2 * self.temperature, dim=-1
+		) # Target will contain the correct similarity between images and texts combined, wich after softmax should be a matrix with values close to one in its diagonal and 0 otw
+		texts_loss = cross_entropy(logits, targets, reduction='none') #With the targets matrix, we will use simple cross entropy to calculate the actual loss.
+		image_text_loss = cross_entropy(logits.T, targets.T, reduction='none')
+		loss =  (image_text_loss + texts_loss) / 2.0 # shape: (batch_size)
+		#pdb.set_trace()
+
 		return loss.mean()
 
 
@@ -341,6 +386,7 @@ def process_data(dir_path, clean_data_file=1):
 
 	df_clean.to_csv('processed_texts.csv', index=False, na_rep='')
 	#%cp -av processed_texts.csv $dir_path
+	#df_processed = pd.read_csv('/content/gdrive/MyDrive/Fourth semester/MS_project/MAMI/data/processed_texts.csv', header='infer', keep_default_na=False)
 
 	return df_clean
 
@@ -397,6 +443,8 @@ def append_label_as_text(dataframe):
 	dataframe.loc[dataframe['misogynous'] == 1, 'transcripts'] = dataframe.loc[dataframe['misogynous'] == 1].apply(lambda row : row[6]+' [SEP] a misogynist meme' , axis = 1)
 	dataframe.loc[dataframe['misogynous'] == 0, 'transcripts'] = dataframe.loc[dataframe['misogynous'] == 0].apply(lambda row : row[6]+' [SEP] a meme' , axis = 1)
 
+	dataframe["misogynous"] = dataframe["misogynous"].replace({0: 'a meme', 1:'a misogynist meme'})
+
 	return dataframe
 
 def get_transforms(mode="train"):
@@ -446,7 +494,7 @@ def train_epoch(model, train_loader, optimizer, lr_scheduler, step):
 	loss_meter = AvgMeter()
 	tqdm_object = tqdm(train_loader, total=len(train_loader))
 	for batch in tqdm_object: # Each batch is size 4xnum_examples_in_batch. It has four keys: ['input_ids', 'attention_mask', 'images', 'caption'] and each key has num_examples_in_batch arrays
-		batch = {k: v.to(CFG.device) for k, v in batch.items() if k != "caption"} # The batch that is sent to the model contains the image embedding and the transcriptions embeddings ('input_ids', 'attention_mask'). The raw text ('caption') is not sent to the CLIP model
+		batch = {k: v.to(CFG.device) for k, v in batch.items() if k != "caption" and k != "label"} # The batch that is sent to the model contains the image embedding and the transcriptions embeddings ('input_ids', 'attention_mask'). The raw text ('caption') is not sent to the CLIP model
 		loss = model(batch)
 		optimizer.zero_grad()
 		loss.backward()
@@ -531,6 +579,7 @@ def get_image_embeddings(test, model_path):
 
 def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	tokenizer = DistilBertTokenizer.from_pretrained(CFG.text_tokenizer)
+	#pdb.set_trace()
 	#qu = [tokenizer(c, padding=True) for c in query]
 	encoded_query = tokenizer(query, padding=True) # Padding true to pad to the longest sequence in the query so both tensors are same size
 
@@ -541,6 +590,7 @@ def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	with torch.no_grad():
 		text_features = model.text_encoder(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
 		text_embeddings = model.text_projection(text_features)
+	#pdb.set_trace()
 	image_embeddings_n = F.normalize(image_embeddings, p=2, dim=-1)
 	text_embeddings_n = F.normalize(text_embeddings, p=2, dim=-1)
 	dot_similarity = text_embeddings_n @ image_embeddings_n.T # Find similarity between the query text embedding and the images in the batch. Returns  vector of size 1 x #images in batch 
@@ -551,6 +601,8 @@ def find_matches(model, image_embeddings, query, image_filenames, n=9):
 	logits = logit_scale * text_embeddings_n @ image_embeddings_n.T
 
 	probs = logits.T.softmax(dim=-1).cpu().numpy()
+
+	#pdb.set_trace()
 	
 	'''
 	values, indices = torch.topk(dot_similarity.squeeze(0), n * 1)
@@ -606,6 +658,7 @@ def main():
 	with open(os.path.join(home_dir, "google_profanity_words.txt")) as f:
 		for line in f:
 			swearWords.add(line.rstrip())
+	#print(swearWords)
 
 	#train_df, valid_df = make_train_valid_dfs()
 
@@ -644,12 +697,19 @@ def main():
 		train_CLIP(train, validation)
 		
 	test = pd.read_csv(os.path.join(home_dir,'test_small.csv'), header='infer', keep_default_na=False)
+	#append_label_as_text(test)
 
 	model, image_embeddings = get_image_embeddings(test, "best.pt")
 
 	probs = []
 	y_pred = []
-
+	#pdb.set_trace()
+	#test['transcripts1'] = test['transcripts']
+	#test['transcripts'] = test['transcripts'].apply(lambda x: x+' [SEP] a meme')
+	#test['transcripts1'] = test['transcripts1'].apply(lambda x: x+' [SEP] a misogynist meme')
+	#query = test[['transcripts', 'transcripts1']].values.tolist()
+	#query = np.array(query)
+	#pdb.set_trace()
 	for index, row in test.iterrows():
 		query = [row['transcripts']+" [SEP] a meme", row['transcripts']+" [SEP] a misogynist meme"]
 		prob = find_matches(model, image_embeddings[index].unsqueeze(0), query, image_filenames=test['file_name'].values, n=9)
